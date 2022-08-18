@@ -4,7 +4,6 @@ import argparse
 import subprocess
 import signal
 import potpy
-from importlib_metadata import version
 
 ######## BEGIN CONFIGURATION ########
 johnConf = "/home/awillard/src/john/run/john.conf"
