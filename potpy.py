@@ -3,13 +3,12 @@
 __author__ = 'Original by Jake Miller; Modified by awillard1 - github'
 __date__ = '20220818'
 __version__ = '1.11'
-__description__ = """Extracts the plain passwords from a hashcat or jtr pot file. Cleans them if specified."""
+__description__ = """Extracts the plain passwords from a hashcat or jtr pot file."""
 
 import argparse
 import re
 import os
 import subprocess
-from importlib_metadata import version
 
 ######## BEGIN CONFIGURATION ########
 potfiles = ["/mnt/d/data/hashcat-6.2.4/hashcat.potfile","/mnt/d/data/hashcat/hashcat.potfile","/mnt/d/data/hashcat6/hashcat.potfile","/home/awillard/src/john/run/john.pot"]
