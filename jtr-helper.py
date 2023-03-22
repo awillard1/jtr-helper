@@ -122,9 +122,9 @@ def crackpwds(rule, wordlist):
     isRunning = True
     
     if (int(johnFork) <= 1):
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + rule + " --force-tty", shell = True)
+        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --no-log --format:" + hashFormat + " --rules:" + rule + " --force-tty", shell = True)
     else:
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + rule + " --fork:" + johnFork + " --force-tty", shell = True)
+        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --no-log --format:" + hashFormat + " --rules:" + rule + " --fork:" + johnFork + " --force-tty", shell = True)
      
     updateShell()
 
