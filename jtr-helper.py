@@ -6,12 +6,12 @@ import signal
 import potpy
 
 ######## BEGIN CONFIGURATION ########
-johnConf = "/home/YOURUSER/src/john/run/john.conf"
-johnLocalConf = "/home/YOURUSER/src/john/run/john-local.conf"
-jtrLocation = "/home/YOURUSER/src/john/run/john"
+johnConf = "/home/willard/src/john/run/john.conf"
+johnLocalConf = "/home/willard/src/john/run/john-local.conf"
+jtrLocation = "/home/willard/src/john/run/john"
 ######## END CONFIGURATION   ######## 
 
-__version__ = '1.25'
+__version__ = '1.26'
 
 def setJohnFork():
     global johnFork
@@ -197,7 +197,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.25")
+    print("\r\njtr-helper 1.26")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
@@ -211,6 +211,7 @@ if __name__ == '__main__':
     print("    set values for potfiles, wordlist_dir, finalFileName")
     print("___________________________________________________________\n\n")
     parser = argparse.ArgumentParser()
+    parser.add_argument("-b", "--build", help="run just -b to update the master wordlist",action='store_const', const=True)
     parser.add_argument("-f", "--format", help="specify the jtr hash format")
     parser.add_argument("-w", "--wordlist", help="specify the file with wordlist")
     parser.add_argument("-r", "--recursive", help="used with wordlists if a directory is defined: -w /wordlistDIR/*",action='store_const', const=True)
@@ -222,6 +223,10 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--chained", help="used to chain rules instead of looping",action='store_const', const=True)
     
     args = parser.parse_args()
+    if (args.build):
+        isUpdateMaster = True
+        updateShell()
+        exit()
     if args.format and args.wordlist and args.hashes:
         hashFormat=args.format
         wordlist = args.wordlist
