@@ -6,12 +6,12 @@ import signal
 import potpy
 
 ######## BEGIN CONFIGURATION ########
-johnConf = "/home/awillard/src/john/run/john.conf"
-johnLocalConf = "/home/awillard/src/john/run/john-local.conf"
-jtrLocation = "/home/awillard/src/john/run/john"
+johnConf = "/home/YOURUSER/src/john/run/john.conf"
+johnLocalConf = "/home/YOURUSER/src/john/run/john-local.conf"
+jtrLocation = "/home/YOURUSER/src/john/run/john"
 ######## END CONFIGURATION   ######## 
 
-__version__ = '1.17'
+__version__ = '1.25'
 
 def setJohnFork():
     global johnFork
@@ -76,8 +76,28 @@ def createRuleList():
     readConf()
     print("\r\nIf you want to run all the rules listed, enter * and press enter")
     print("If you want to run some rules, comma separate the numbers and press enter\r\n")
-    val = input("Enter the number of the rule to run: ")    
-    if ("," in val):
+    if (isChained):
+        val = input("Enter the number of the rules to chain together: ")
+    else:
+        val = input("Enter the number of the rule to run: ")
+    
+    if (isChained):
+        try:
+            listNumberRule = val.split(",")
+            rules = []
+            for ruleNumber in listNumberRule:
+                if (ruleNumber.isnumeric() and int(ruleNumber) >= 0 and int(ruleNumber) <= len(ruleList)):
+                    rules.append(ruleList[int(ruleNumber)])
+            rule = ','.join(rules)
+            print("\r\n" + rule + " (as chained rules)")
+            if (isWordlists):
+                loopCrack(rule)
+            else:
+                crackpwds(rule, wordlist)
+        except:
+            print("unable to split and run jtr")
+            exit();
+    elif ("," in val):
         try:
             listNumberRule = val.split(",")
             for ruleNumber in listNumberRule:
@@ -122,13 +142,19 @@ def crackpwds(rule, wordlist):
     isRunning = True
     
     if (int(johnFork) <= 1):
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --no-log --format:" + hashFormat + " --rules:" + rule + " --force-tty", shell = True)
+        subprocess.call(jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --force-tty --no-log --session=" + jtrsession, shell = True)
     else:
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:8 --max-length:30 --wordlist:" + wordlist + " --no-log --format:" + hashFormat + " --rules:" + rule + " --fork:" + johnFork + " --force-tty", shell = True)
+        subprocess.call(jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession, shell = True)
      
     updateShell()
 
+def displayConfig():
+    print("Session Name: " + jtrsession)
+    print("Min-Length: " + minlength)
+    print("Max-Length: " + maxlength + "\r\n")
+
 def main():
+    displayConfig()
     updateShell()
     setJohnFork()
     verifyPaths()
@@ -171,7 +197,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.17")
+    print("\r\njtr-helper 1.25")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
@@ -189,7 +215,11 @@ if __name__ == '__main__':
     parser.add_argument("-w", "--wordlist", help="specify the file with wordlist")
     parser.add_argument("-r", "--recursive", help="used with wordlists if a directory is defined: -w /wordlistDIR/*",action='store_const', const=True)
     parser.add_argument("-hash", "--hashes", help="specify the file with hashes")
+    parser.add_argument("-min", "--minlength", help="specify the min-length")
+    parser.add_argument("-max", "--maxlength", help="specify the max-length")
+    parser.add_argument("-session", "--session", help="specify the session")
     parser.add_argument("-s", "--script", help="used to update master list",action='store_const', const=True)
+    parser.add_argument("-c", "--chained", help="used to chain rules instead of looping",action='store_const', const=True)
     
     args = parser.parse_args()
     if args.format and args.wordlist and args.hashes:
@@ -197,7 +227,7 @@ if __name__ == '__main__':
         wordlist = args.wordlist
         hashFile = args.hashes
         isUpdateMaster = True if args.script is not None else False
-
+        isChained = True if args.chained is not None else False
         if (args.recursive is None and "/*" in args.wordlist):
             print("You must specify a wordlist file. \r\n* can not be used with out the -r option for wordlist.\r\nPlease correct: " + args.wordlist)
             exit()
@@ -209,4 +239,26 @@ if __name__ == '__main__':
     else:
         parser.print_help()
         exit()
+    if (args.minlength is None):
+        minlength=8
+    else:
+        minlength=args.minlength
+        
+    if (args.maxlength is None):
+        maxlength=24
+    else:
+        maxlength=args.maxlength   
+    
+    if (minlength.isnumeric() == False):
+        print("Please enter a number for minlength")
+        exit()
+    if (maxlength.isnumeric() == False):
+        print("Please enter a number for maxlength")
+        exit()
+    
+    if (args.session is None):
+        jtrsession='jtrdefault'
+    else:
+        jtrsession=args.session
+    
     main()
