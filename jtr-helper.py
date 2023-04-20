@@ -4,6 +4,8 @@ import argparse
 import subprocess
 import signal
 import potpy
+import random
+import string
 
 ######## BEGIN CONFIGURATION ########
 johnConf = "/home/willard/src/john/run/john.conf"
@@ -11,7 +13,7 @@ johnLocalConf = "/home/willard/src/john/run/john-local.conf"
 jtrLocation = "/home/willard/src/john/run/john"
 ######## END CONFIGURATION   ######## 
 
-__version__ = '1.26'
+__version__ = '1.27'
 
 def setJohnFork():
     global johnFork
@@ -49,6 +51,9 @@ def readConf():
     #AddKorelogic
     print("["+str(i)+"] korelogic")
     ruleList.append("korelogic")
+
+def setSessionIfNull():
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
     
 def loopCrack(rule):
     wordlistdir = wordlistDir.replace("*","")
@@ -197,7 +202,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.26")
+    print("\r\njtr-helper 1.27")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
@@ -262,7 +267,7 @@ if __name__ == '__main__':
         exit()
     
     if (args.session is None):
-        jtrsession='jtrdefault'
+        jtrsession = setSessionIfNull()
     else:
         jtrsession=args.session
     
