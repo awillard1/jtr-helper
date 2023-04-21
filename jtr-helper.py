@@ -53,7 +53,7 @@ def readConf():
 def setSessionIfNull():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
     
-def loopCrack(rule):
+def loopCrack(rule, crule):
     wordlistdir = wordlistDir.replace("*","")
     for root, dirs, files in os.walk(wordlistdir):
         for file in files:
@@ -63,7 +63,7 @@ def loopCrack(rule):
                 wordlist = root +"/"+ file
             
             print("Loading: " + wordlist)
-            crackpwds(rule, wordlist)
+            crackpwds(rule, wordlist, crule)
 
 def createRuleList():
     #---------------------------------NOTE---------------------------------
@@ -80,23 +80,27 @@ def createRuleList():
     print("\r\nIf you want to run all the rules listed, enter * and press enter")
     print("If you want to run some rules, comma separate the numbers and press enter\r\n")
     if (isChained):
-        val = input("Enter the number of the rules to chain together: ")
+        val = input("Enter the numbers of the rules separeted by a comma. The first rule will be set for --rules and the rest will be assigned to --rules-stacked: ")
     else:
-        val = input("Enter the number of the rule to run: ")
+        val = input("Enter the number(s) of the rule to run: ")
     
     if (isChained):
         try:
             listNumberRule = val.split(",")
-            rules = []
+            rules = []  
+
             for ruleNumber in listNumberRule:
                 if (ruleNumber.isnumeric() and int(ruleNumber) >= 0 and int(ruleNumber) <= len(ruleList)):
                     rules.append(ruleList[int(ruleNumber)])
+            
+            crule = rules[0]            
+            rules.pop(0)
             rule = ','.join(rules)
-            print("\r\n" + rule + " (as chained rules)")
+            print("\r\nRule: " + crule + " and " + rule + " (as stacked rules)")
             if (isWordlists):
-                loopCrack(rule)
+                loopCrack(rule, crule)
             else:
-                crackpwds(rule, wordlist)
+                crackpwds(rule, wordlist, crule)
         except:
             print("unable to split and run jtr")
             exit();
@@ -108,9 +112,9 @@ def createRuleList():
                     rule = ruleList[int(ruleNumber)]
                     print("\r\n" + rule + " ruleset will be used")
                     if (isWordlists):
-                        loopCrack(rule)
+                        loopCrack(rule, None)
                     else:
-                        crackpwds(rule, wordlist)
+                        crackpwds(rule, wordlist, None)
         except:
             print("unable to split and run jtr")
             exit();    
@@ -119,16 +123,16 @@ def createRuleList():
             if (r not in extrarules):
                 print("Rule: " + r)
                 if (isWordlists):
-                    loopCrack(r)
+                    loopCrack(r, None)
                 else:
-                    crackpwds(r,wordlist)
+                    crackpwds(r,wordlist, None)
     elif (val.isnumeric() and int(val)>=0 and int(val) <= len(ruleList)):
         rule = ruleList[int(val)] 
         print("\r\n" + rule + " ruleset will be used")
         if (isWordlists):
-            loopCrack(rule)
+            loopCrack(rule, None)
         else:
-            crackpwds(rule, wordlist)
+            crackpwds(rule, wordlist, None)
     else:
         exit()
 
@@ -140,16 +144,21 @@ def updateShell():
     potpy.process_potfile()
     print("Update Completed\r\n")
 
-def crackpwds(rule, wordlist):
+def crackpwds(rule, wordlist, crule):
     global isRunning
     isRunning = True
-    
+    if (crule is None):
+        stackedRule=""
+        r = rule
+    else:
+        stackedRule = " --rules-stack:" + rule + " "
+        r = crule
     if (int(johnFork) <= 1):
-        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --force-tty --no-log --session=" + jtrsession
+        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r + stackedRule + " --force-tty --no-log --session=" + jtrsession
         print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
         subprocess.call(cmdToRun, shell = True)
     else:
-        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession
+        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r +  stackedRule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession
         print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
         subprocess.call(cmdToRun, shell = True)
      
@@ -204,7 +213,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.28")
+    print("\r\njtr-helper 1.29")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
