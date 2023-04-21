@@ -13,8 +13,6 @@ johnLocalConf = "/home/willard/src/john/run/john-local.conf"
 jtrLocation = "/home/willard/src/john/run/john"
 ######## END CONFIGURATION   ######## 
 
-__version__ = '1.27'
-
 def setJohnFork():
     global johnFork
     johnFork = input("Enter the --fork value for John (1 to " + str(os.cpu_count()) + "): ")    
@@ -147,9 +145,13 @@ def crackpwds(rule, wordlist):
     isRunning = True
     
     if (int(johnFork) <= 1):
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --force-tty --no-log --session=" + jtrsession, shell = True)
+        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --force-tty --no-log --session=" + jtrsession
+        print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
+        subprocess.call(cmdToRun, shell = True)
     else:
-        subprocess.call(jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession, shell = True)
+        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules-stack:" + rule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession
+        print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
+        subprocess.call(cmdToRun, shell = True)
      
     updateShell()
 
@@ -202,7 +204,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.27")
+    print("\r\njtr-helper 1.28")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
