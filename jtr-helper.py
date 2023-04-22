@@ -261,12 +261,12 @@ if __name__ == '__main__':
         parser.print_help()
         exit()
     if (args.minlength is None):
-        minlength=8
+        minlength='8'
     else:
         minlength=args.minlength
         
     if (args.maxlength is None):
-        maxlength=24
+        maxlength='24'
     else:
         maxlength=args.maxlength   
     
