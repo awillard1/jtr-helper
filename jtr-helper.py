@@ -214,7 +214,7 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.29")
+    print("\r\njtr-helper 1.31")
     print("Ensure Configurations are set for jtr-helper.py")
     print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
     print("                 __             ")
