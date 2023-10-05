@@ -153,14 +153,15 @@ def crackpwds(rule, wordlist, crule):
     else:
         stackedRule = " --rules-stack:" + rule + " "
         r = crule
-    if (int(johnFork) <= 1):
-        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r + stackedRule + " --force-tty --no-log --session=" + jtrsession
-        print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
-        subprocess.call(cmdToRun, shell = True)
-    else:
-        cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r +  stackedRule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession
-        print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
-        subprocess.call(cmdToRun, shell = True)
+    for hashFormat in hashFormats.split(","):
+        if (int(johnFork) <= 1):
+            cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r + stackedRule + " --force-tty --no-log --session=" + jtrsession
+            print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
+            subprocess.call(cmdToRun, shell = True)
+        else:
+            cmdToRun = jtrLocation + " " + hashFile + " --min-length:" + minlength + " --max-length:" + maxlength + " --wordlist:" + wordlist + " --format:" + hashFormat + " --rules:" + r +  stackedRule + " --fork:" + johnFork + " --force-tty --no-log --session=" + jtrsession
+            print("\r\nRunning:\r\n" + cmdToRun + "\r\n");
+            subprocess.call(cmdToRun, shell = True)
      
     updateShell()
 
@@ -244,7 +245,7 @@ if __name__ == '__main__':
         updateShell()
         exit()
     if args.format and args.wordlist and args.hashes:
-        hashFormat=args.format
+        hashFormats=args.format
         wordlist = args.wordlist
         hashFile = args.hashes
         isUpdateMaster = True if args.script is not None else False
