@@ -11,8 +11,20 @@ import os
 import subprocess
 
 ######## BEGIN CONFIGURATION ########
-potfiles = ["/mnt/d/data/hashcat-6.2.4/hashcat.potfile","/mnt/d/data/hashcat/hashcat.potfile","/mnt/d/data/hashcat6/hashcat.potfile","/home/awillard/src/john/run/john.pot"]
-wordlist_dir = "/mnt/d/data/wordlists/"
+directory = "/mnt/c/PenTesting/data/potfiles/"
+potfiles = []
+
+for filename in os.listdir(directory):
+    full_path = os.path.join(directory, filename)
+    if os.path.isfile(full_path):
+        potfiles.append(full_path)
+
+potfiles.append("/mnt/c/PenTesting/data/hashcat-6.2.6/master.txt")
+potfiles.append("/mnt/c/PenTesting/hashcat.potfile")
+potfiles.append("/mnt/c/PenTesting/data/hashcat-6.2.6/hashcat.potfile")
+potfiles.append("/home/willard/src/john/run/john.pot")
+
+wordlist_dir = "/home/willard/wordlists/"
 finalFileName = "master.lst"
 ######## END CONFIGURATION   ######## 
 
@@ -101,3 +113,4 @@ if __name__ == '__main__':
         potfile = args.filename
         outfile = args.outfile 
     #main()
+
