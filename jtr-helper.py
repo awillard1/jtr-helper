@@ -1,516 +1,382 @@
 #!/usr/bin/env python3
 """
-jtr-helper.py — wrapper for John with master wordlist building via potpy.
+jtr-helper.py  —  interactive John-the-Ripper helper
 
-Behavior:
- - With -b / --build: build the master list FIRST and exit.
- - With -s / --script: build the master list FIRST, then run cracking, then
-   IF any watched potfiles changed during cracking, build AGAIN at the end.
- - Without -s/-b: no master build is performed by this script.
-
-Other details:
- - John is launched inheriting your TTY (hotkeys like 's' work).
- - Wildcard hash specs (e.g., "hashes/*") are expanded inside Python.
- - Build uses potpy.py (parallel+cache) synchronously, with clear timing.
+Features
+- HOME-based config (works across users)
+- Interactive prompt to choose John [List.Rules.*] sections
+  • Accepts indices or names; re-prompts until valid
+  • Supports --chained: first selection is --rules, rest via --rules-stack:
+  • Enumerates rules via `john --list=rules` (authoritative); file-scan fallback
+- Hash glob support (e.g., -hash "hashes/*")
+- Keeps john interactive (status keys like 's' still work)
+- Integrates with potpy.py to (re)build master wordlist (-s or -b)
+  • Prints start/end times and elapsed duration
+- Safe signal handling to skip/exit cleanly
 """
-from __future__ import annotations
+
 import os
 import re
-import argparse
-import subprocess
+import sys
+import time
+import glob
+import shlex
 import signal
-import potpy
 import random
 import string
-import time
-from datetime import datetime
-import sys
-import shutil
-import tempfile
-import glob
+import argparse
+import subprocess
 from pathlib import Path
+from typing import List
+
+# ============= BEGIN CONFIG (HOME-based) =============
 HOME = Path.home()
 
-######## BEGIN CONFIGURATION ########
-johnConf      = str((HOME / "src" / "john" / "run" / "john.conf").expanduser())
-johnLocalConf = str((HOME / "src" / "john" / "run" / "john-local.conf").expanduser())
-jtrLocation   = str((HOME / "src" / "john" / "run" / "john").expanduser())
-######## END CONFIGURATION   ########
+# John paths
+johnConf       = str(HOME / "src/john/run/john.conf")
+johnLocalConf  = str(HOME / "src/john/run/john-local.conf")
+jtrLocation    = str(HOME / "src/john/run/john")           # john binary (default; can override with --john-bin)
 
-# ---- potpy parallel-merge config ----
-potpy_script   = str((HOME / "scripts" / "potpy.py").expanduser())       # path to potpy.py (fast merge CLI)
-fast_tmpdir    = "/tmp/potpy"                            # set to disk-backed path if /tmp is tmpfs (e.g., /mnt/nvme/potpy_tmp)
-fast_mem       = "25%"                                   # GNU sort memory (-S)
-fast_parallel  = max(1, (os.cpu_count() or 1) // 2)      # --parallel for sort
-final_master   = str((HOME / "wordlists" / "master.lst").expanduser())   # final master path
-cache_dir      = os.path.expanduser("~/.cache/potpy/decoded")
-gc_cache_days  = 30                                      # days to keep decoded cache; 0 disables GC
+# potpy integration (for -s / -b master build)
+potpy_script   = str(HOME / "scripts/potpy.py")
+final_master   = str(HOME / "wordlists/master.lst")
+# ============= END CONFIG ============================
 
-# John/OpenMP tuning (forked children can be memory hungry)
-omp_threads_per_fork = 1                                 # reduce if children were dying
-# ------------------------------------
-
-# Globals (some set later from args)
-isWordlists = False
-isChained = False
+# Globals (kept minimal)
+ruleList: List[str] = []
 isRunning = False
-ruleList = []
-jtrsession = ""
-johnFork = "1"
-wordlist = ""
-wordlistDir = ""
-hashFormats = ""
-hashFile = ""
-minlength = '8'
-maxlength = '24'
 
-# -------- potfile change detection --------
-def _pot_watch_list() -> list[str]:
-    """Prefer potpy.potfiles; otherwise, watch common defaults."""
-    try:
-        files = list(getattr(potpy, "potfiles", []))
-    except Exception:
-        files = []
-    # Add some likely defaults if missing
-    defaults = [
-        os.path.expanduser("~/.john/john.pot"),
-        "/home/willard/src/john/run/john.pot",
-        "/mnt/c/PenTesting/hashcat.potfile",
-        "/mnt/c/PenTesting/data/hashcat-6.2.6/hashcat.potfile",
-    ]
-    for p in defaults:
-        if p not in files:
-            files.append(p)
-    # Keep only paths that exist (we’ll still snapshot non-existent as None)
-    return files
+# ---------- Regex for fallback file scanning ----------
+RULE_SECTION_RE = re.compile(r'^\s*\[List\.Rules[.:]([^\]]+)\]\s*(?:[#;].*)?$')
 
-def _snapshot(paths: list[str]) -> dict[str, tuple[int,int] | None]:
-    """
-    Return {path: (mtime_ns, size)} for existing files; None for missing.
-    """
-    snap = {}
-    for p in paths:
-        try:
-            st = os.stat(p)
-            snap[p] = (st.st_mtime_ns, st.st_size)
-        except FileNotFoundError:
-            snap[p] = None
-        except Exception:
-            snap[p] = None
-    return snap
 
-def _changed(before: dict, after: dict) -> list[str]:
-    """
-    Return list of paths whose (mtime,size) changed (including newly created).
-    """
-    dirty = []
-    for p, b in before.items():
-        a = after.get(p, None)
-        if b is None and a is not None:
-            dirty.append(p)
-        elif b is not None and a is None:
-            # deleted; not typical for pots, ignore unless you want to rebuild anyway
-            continue
-        elif b is not None and a is not None and b != a:
-            dirty.append(p)
-    return dirty
-# -----------------------------------------
-
-def setJohnFork():
-    global johnFork
-    johnFork = input("Enter the --fork value for John (1 to " + str(os.cpu_count()) + "): ")
-    if (johnFork.isnumeric() == False):
-        print("--fork was not numeric. Please set --fork to a value between 1 and " + str(os.cpu_count()))
-        exit()
-    elif (int(johnFork) < 1 or int(johnFork) > os.cpu_count()):
-        print("Please set --fork to a value between 1 and " + str(os.cpu_count()))
-        exit()
-
-def readConf():
-    i = 0
-    if (os.path.exists(johnConf) == False):
-        print("Unable to locate john.conf: " + johnConf + "\r\nExiting")
-        exit()
-    with open(johnConf, "r", encoding="utf-8", errors="ignore") as jtrconf:
-        for line in jtrconf:
-            match = re.match(r"^\[List.Rules.(.*)\].*$", line)
-            if match:
-                rule = match.group(1)
-                print("["+str(i)+"] "+rule)
-                ruleList.append(rule)
-                i = i + 1
-    if (os.path.exists(johnLocalConf)):
-        with open(johnLocalConf,"r", encoding="utf-8", errors="ignore") as jtrlocalconf:
-            for line in jtrlocalconf:
-                match = re.match(r"^\[List.Rules.(.*)\].*$", line)
-                if match:
-                    rule = match.group(1)
-                    print("["+str(i)+"] "+rule)
-                    ruleList.append(rule)
-                    i = i + 1
-    # Add Korelogic
-    print("["+str(i)+"] korelogic")
-    ruleList.append("korelogic")
-
+# ------------------ Utilities ------------------
 def setSessionIfNull():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
 
-def loopCrack(rule, crule):
-    wordlistdir = wordlistDir.replace("*","")
-    for root, dirs, files in os.walk(wordlistdir):
-        for file in files:
-            if (root == wordlistdir):
-                w = root + file
-            else:
-                w = root +"/"+ file
-            print("Loading: " + w)
-            crackpwds(rule, w, crule)
 
-def createRuleList():
-    # NOTE: o3 and i3 excluded due to very long runtimes. Remove from list to include.
-    # o1,i1,o2,i3 removed because they are covered by the oi rule set.
-    extrarules = ["best64","d3ad0ne","dive","InsidePro","T0XlC","rockyou-30000","specific","o","i","i1","i2","o1","o2","o3","i3"]
-    readConf()
-    print("\r\nIf you want to run all the rules listed, enter * and press enter")
-    print("If you want to run some rules, comma separate the numbers and press enter\r\n")
-    if (isChained):
-        val = input("Enter the numbers of the rules separeted by a comma. The first rule will be set for --rules and the rest will be assigned to --rules-stacked: ")
-    else:
-        val = input("Enter the number(s) of the rule to run: ")
+def _resolve_john_binary(john_bin_cfg: str) -> str:
+    """Choose which 'john' to run."""
+    # explicit override
+    if john_bin_cfg and os.path.isfile(john_bin_cfg) and os.access(john_bin_cfg, os.X_OK):
+        return john_bin_cfg
+    # configured default
+    if os.path.isfile(jtrLocation) and os.access(jtrLocation, os.X_OK):
+        return jtrLocation
+    # PATH search
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        cand = os.path.join(p, "john")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    # last resort
+    return john_bin_cfg or jtrLocation
 
-    if (isChained):
-        try:
-            listNumberRule = val.split(",")
-            rules = []
-            for ruleNumber in listNumberRule:
-                if (ruleNumber.isnumeric() and int(ruleNumber) >= 0 and int(ruleNumber) <= len(ruleList)):
-                    rules.append(ruleList[int(ruleNumber)])
-            crule = rules[0]
-            rules.pop(0)
-            rule = ','.join(rules)
-            print("\r\nRule: " + crule + " and " + rule + " (as stacked rules)")
-            if (isWordlists):
-                loopCrack(rule, crule)
-            else:
-                crackpwds(rule, wordlist, crule)
-        except:
-            print("unable to split and run jtr")
-            exit()
-    elif ("," in val):
-        try:
-            listNumberRule = val.split(",")
-            for ruleNumber in listNumberRule:
-                if (ruleNumber.isnumeric() and int(ruleNumber) >= 0 and int(ruleNumber) <= len(ruleList)):
-                    rule = ruleList[int(ruleNumber)]
-                    print("\r\n" + rule + " ruleset will be used")
-                    if (isWordlists):
-                        loopCrack(rule, None)
-                    else:
-                        crackpwds(rule, wordlist, None)
-        except:
-            print("unable to split and run jtr")
-            exit()
-    elif (val == "*"):
-        for r in ruleList:
-            if (r not in extrarules):
-                print("Rule: " + r)
-                if (isWordlists):
-                    loopCrack(r, None)
-                else:
-                    crackpwds(r,wordlist, None)
-    elif (val.isnumeric() and int(val)>=0 and int(val) <= len(ruleList)):
-        rule = ruleList[int(val)]
-        print("\r\n" + rule + " ruleset will be used")
-        if (isWordlists):
-            loopCrack(rule, None)
-        else:
-            crackpwds(rule, wordlist, None)
-    else:
-        exit()
 
-def _format_duration(seconds: float) -> str:
-    seconds = int(round(seconds))
-    hrs, rem = divmod(seconds, 3600)
-    mins, secs = divmod(rem, 60)
-    parts = []
-    if hrs: parts.append(f"{hrs}h")
-    if mins: parts.append(f"{mins}m")
-    parts.append(f"{secs}s")
-    return ' '.join(parts)
+def _list_rules_authoritatively(john_bin: str) -> List[str]:
+    """Use `john --list=rules` to enumerate available rule sections."""
+    cmd = [john_bin, "--list=rules"]
+    print(f"[i] Listing rules via: {' '.join(shlex.quote(x) for x in cmd)}")
+    out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+    lines = out.decode("utf-8", "replace").splitlines()
+    rules = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    return rules
 
-def _prepare_tmpdir(path: str, verbose: bool=True) -> str:
-    """Ensure tmpdir exists & is writable; fallback to system tmp if not."""
+
+def _scan_file_for_rules(pth: str, found: List[str]) -> None:
+    """Fallback: scan a config-like file for [List.Rules.*] headers."""
     try:
-        if path:
-            os.makedirs(path, exist_ok=True)
-            testfile = os.path.join(path, ".jtr_helper_write_test")
-            with open(testfile, "w") as f:
-                f.write("x")
-            os.remove(testfile)
-            if verbose:
-                print(f"[+] Using tmpdir: {path}")
-            return path
-    except Exception as e:
-        if verbose:
-            print(f"[!] Requested tmpdir '{path}' not usable ({e}); falling back to system temp.")
+        with open(pth, "r", encoding="latin-1", errors="replace") as f:
+            for line in f:
+                m = RULE_SECTION_RE.match(line)
+                if not m:
+                    continue
+                name = m.group(1).strip()
+                if name and name not in found:
+                    found.append(name)
+    except OSError as e:
+        print(f"[!] Failed to read {pth}: {e}")
 
-    sys_tmp = tempfile.gettempdir()
-    try:
-        testfile = os.path.join(sys_tmp, ".jtr_helper_write_test")
-        with open(testfile, "w") as f:
-            f.write("x")
-        os.remove(testfile)
-        if verbose:
-            print(f"[+] Using system tmpdir: {sys_tmp}")
-        return sys_tmp
-    except Exception as e:
-        if verbose:
-            print(f"[!] System temp '{sys_tmp}' not usable ({e}); proceeding without -T.")
-        return ""  # no usable temp; we won't pass --tmpdir
 
-def updateShell():
-    """
-    Build the master wordlist via potpy (synchronously).
-    Prints start/end/elapsed. Detaches stdin from the child.
-    """
-    py = shutil.which("python3") or sys.executable
-    mem = fast_mem if fast_mem else "25%"
-    par = fast_parallel if fast_parallel and int(fast_parallel) > 0 else max(1, (os.cpu_count() or 1) // 2)
-    eff_tmpdir = _prepare_tmpdir(fast_tmpdir, verbose=True)
-
-    cmd = [
-        py, potpy_script,
-        "--merge-parallel",
-        "--final", final_master,
-        "--mem", str(mem),
-        "--parallel", str(par),
-        "-v",
-        "--gc-cache-days", str(gc_cache_days)
+def _fallback_scan_for_rules() -> List[str]:
+    """Try known files/dirs if `--list=rules` is unavailable."""
+    found: List[str] = []
+    candidates = [
+        johnConf,
+        johnLocalConf,
+        str(Path(johnConf).parent / "rules"),  # ~/src/john/run/rules
+        str(HOME / ".john"),
+        "/usr/share/john",
+        "/etc/john",
     ]
-    if eff_tmpdir:
-        cmd.extend(["--tmpdir", eff_tmpdir])
-    if cache_dir:
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            cmd.extend(["--cache-dir", cache_dir])
-        except Exception:
-            pass
+    for c in candidates:
+        p = Path(c)
+        if p.is_file():
+            _scan_file_for_rules(str(p), found)
+        elif p.is_dir():
+            for f in p.rglob("*"):
+                if f.is_file() and f.suffix.lower() in (".conf", ".rules", ".ini", ".txt", ""):
+                    _scan_file_for_rules(str(f), found)
+    return found
 
-    start_dt = datetime.now().astimezone()
-    print("\r\nBuilding Master Wordlist (potpy parallel merge + cache)")
-    print(f"Start time: {start_dt:%Y-%m-%d %H:%M:%S %Z}")
-    print("Command: " + " ".join(cmd))
+
+def readConf(john_bin_cfg: str):
+    """Populate global ruleList with every available ruleset."""
+    global ruleList
+    ruleList.clear()
+    john_bin = _resolve_john_binary(john_bin_cfg)
+
+    if not john_bin or not os.path.exists(john_bin):
+        print(f"[!] john binary not found: {john_bin}\n"
+              f"    Pass --john-bin or fix jtrLocation in the script.")
+        sys.exit(1)
+
+    # Authoritative first
+    try:
+        rules = _list_rules_authoritatively(john_bin)
+        if not rules:
+            raise RuntimeError("no rules returned")
+        ruleList.extend(rules)
+    except Exception as e:
+        print(f"[!] `john --list=rules` failed or returned no rules ({e}). Falling back to file scan...")
+        rules = _fallback_scan_for_rules()
+        if not rules:
+            print("[!] Could not discover any rules. Check john config/paths.")
+            sys.exit(1)
+        ruleList.extend(rules)
+
+    # Print discovered list with indices
+    for i, name in enumerate(ruleList):
+        print(f"[{i}] {name}")
+    print(f"[=] Total rules discovered: {len(ruleList)}")
+
+
+def setJohnFork():
+    """Prompt for --fork unless stdin is non-interactive."""
+    global johnFork
+    if not sys.stdin.isatty():
+        johnFork = "1"
+        print("[i] Non-interactive stdin; defaulting --fork=1")
+        return
+    max_fork = os.cpu_count() or 1
+    val = input(f"Enter the --fork value for John (1 to {max_fork}): ").strip()
+    if not val.isnumeric():
+        print(f"--fork was not numeric. Please set --fork to a value between 1 and {max_fork}")
+        sys.exit(1)
+    if int(val) < 1 or int(val) > max_fork:
+        print(f"Please set --fork to a value between 1 and {max_fork}")
+        sys.exit(1)
+    johnFork = val
+
+
+def displayConfig():
+    print("Session Name:", jtrsession)
+    print("Min-Length:", minlength)
+    print("Max-Length:", maxlength, "\n")
+
+
+def verifyPaths(wordlist, hashFile, isWordlists):
+    """Be permissive with globs (hashes/*)."""
+    if isWordlists:
+        wordlistDir = wordlist.replace("*", "")
+        if not os.path.exists(wordlistDir):
+            print(f"The wordlist directory could not be found: {wordlistDir}\nExiting")
+            sys.exit(1)
+    else:
+        if not os.path.exists(wordlist):
+            print(f"The wordlist could not be found: {wordlist}\nExiting")
+            sys.exit(1)
+
+    hp = hashFile
+    if any(ch in hp for ch in "*?[]"):
+        matches = glob.glob(hp)
+        if not matches:
+            print(f"[!] No files matched hash glob: {hp}\nExiting")
+            sys.exit(1)
+    else:
+        if not os.path.exists(hp):
+            print(f"Hash file(s) could not be found: {hp}\nExiting")
+            sys.exit(1)
+
+
+def _run_potpy_build():
+    """Run potpy to (re)build master list; prints start/end and elapsed."""
+    if not os.path.isfile(potpy_script):
+        print(f"[!] potpy.py not found: {potpy_script}")
+        return False
 
     start = time.time()
+    print("\nUpdating Master Wordlist")
+    print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(start))}")
 
-    if os.path.exists(potpy_script):
-        try:
-            subprocess.check_call(cmd, stdin=subprocess.DEVNULL)
-        except subprocess.CalledProcessError as e:
-            elapsed = time.time() - start
-            end_dt = datetime.now().astimezone()
-            print(f"[!] Update failed after {_format_duration(elapsed)}")
-            print(f"End time:   {end_dt:%Y-%m-%d %H:%M:%S %Z}\r\n")
-            print(f"Error: {e}\r\n")
-            return False
-    else:
-        try:
-            result = potpy.process_potfile()
-            if result:
-                print(f"[+] potpy.process_potfile() returned: {result}")
-        except Exception as e:
-            elapsed = time.time() - start
-            end_dt = datetime.now().astimezone()
-            print(f"[!] Fallback potpy.process_potfile() failed after {_format_duration(elapsed)}")
-            print(f"End time:   {end_dt:%Y-%m-%d %H:%M:%S %Z}\r\n")
-            print(f"Error: {e}\r\n")
-            return False
-
-    elapsed = time.time() - start
-    end_dt = datetime.now().astimezone()
-    print(f"Output:    {final_master}")
-    print(f"End time:  {end_dt:%Y-%m-%d %H:%M:%S %Z}")
-    print(f"Elapsed:   {_format_duration(elapsed)}\r\n")
-    return True
-
-def _expand_hash_inputs(raw_hash_spec: str):
-    """
-    Expand a hash file spec into a list of concrete files:
-      - wildcard patterns (e.g., hashes/*)
-      - a directory (all non-hidden files within)
-      - a single file
-      - comma-separated list
-    """
-    files = []
-    if not raw_hash_spec:
-        return files
+    cmd = [sys.executable, potpy_script, "build", "--final", final_master]
+    print("[i] Running:", " ".join(shlex.quote(x) for x in cmd))
     try:
-        if any(ch in raw_hash_spec for ch in ["*", "?", "["]):
-            matches = sorted(glob.glob(raw_hash_spec))
-            if matches:
-                return matches
-        if os.path.isdir(raw_hash_spec):
-            files = sorted(
-                os.path.join(raw_hash_spec, f)
-                for f in os.listdir(raw_hash_spec)
-                if not f.startswith('.') and os.path.isfile(os.path.join(raw_hash_spec, f))
-            )
-            return files
-        if os.path.exists(raw_hash_spec):
-            return [raw_hash_spec]
-        if "," in raw_hash_spec:
-            parts = [p.strip() for p in raw_hash_spec.split(",") if p.strip()]
-            for p in parts:
-                if os.path.exists(p):
-                    files.append(p)
-            return files
-    except Exception as e:
-        print(f"[!] Error resolving hash files: {e}")
-        return []
-    return files
+        ret = subprocess.call(cmd)
+    except KeyboardInterrupt:
+        print("\n[!] Update aborted by user.")
+        return False
 
-def _run_john_with_retry(cmd, env):
-    """Run John once; if it fails and --fork:N present, retry once with half forks."""
-    rc = subprocess.run(cmd, check=False, env=env).returncode
-    if rc == 0:
-        return 0
-    forks = [tok for tok in cmd if tok.startswith("--fork:")]
-    if forks:
-        try:
-            n = int(forks[0].split(":", 1)[1])
-        except Exception:
-            n = 0
-        if n > 1:
-            n2 = max(1, n // 2)
-            cmd2 = [t for t in cmd if not t.startswith("--fork:")]
-            cmd2.append(f"--fork:{n2}")
-            env2 = dict(env)
-            env2["OMP_NUM_THREADS"] = env.get("OMP_NUM_THREADS", "1")
-            print(f"[!] John exited with code {rc}. Retrying once with --fork:{n2} and OMP_NUM_THREADS={env2['OMP_NUM_THREADS']} ...")
-            return subprocess.run(cmd2, check=False, env=env2).returncode
-    return rc
+    end = time.time()
+    if ret == 0:
+        print(f"[+] Update Completed")
+    else:
+        print(f"[!] Update failed (exit code {ret})")
 
-def crackpwds(rule, wordlist, crule):
-    """
-    Launch John in a TTY-friendly way so hotkeys (s, etc.) work.
-    This function DOES NOT build the master list; builds happen before/after.
-    """
+    print(f"End time:   {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(end))}")
+    print(f"Elapsed:    {end - start:.1f}s\n")
+    return ret == 0
+
+
+def updateShell(isUpdateMaster):
+    if not isUpdateMaster:
+        return
+    _run_potpy_build()
+
+
+def _quote_maybe(path: str) -> str:
+    """Quote a path unless it has glob chars (we want shell expansion for hashes/*)."""
+    if any(ch in path for ch in "*?[]"):
+        return path  # leave unquoted for shell glob expansion
+    return shlex.quote(path)
+
+
+def crackpwds(rule, wordlist, crule, john_bin: str):
+    """Invoke john with selected rules / stacking; keep interactive status keys working."""
     global isRunning
     isRunning = True
 
     if crule is None:
-        stackedRule = ""
+        stackedRule = ""    # no stack
         r = rule
     else:
-        stackedRule = f"--rules-stack:{rule}"
+        stackedRule = f" --rules-stack:{rule} " if rule else ""
         r = crule
 
-    env = os.environ.copy()
-    env.setdefault("TERM", os.environ.get("TERM", "xterm-256color"))
-    env.setdefault("LC_ALL", "C")
-    env.setdefault("LANG", "C")
-    if int(johnFork) > 1:
-        env["OMP_NUM_THREADS"] = str(omp_threads_per_fork)
-
-    hash_inputs = _expand_hash_inputs(hashFile)
-    if not hash_inputs:
-        print(f"[!] No valid hash files found from: {hashFile}")
-        isRunning = False
-        return
-
+    # Build john command for each requested format (comma-separated)
     for hashFormat in hashFormats.split(","):
-        cmd = [jtrLocation] + hash_inputs + [
+        # Construct command string manually so we can allow shell globbing on hashFile
+        parts = [
+            _quote_maybe(john_bin),
+            _quote_maybe(hashFile),
             f"--min-length:{minlength}",
             f"--max-length:{maxlength}",
-            f"--wordlist:{wordlist}",
+            f"--wordlist={_quote_maybe(wordlist)}",
             f"--format:{hashFormat}",
             f"--rules:{r}",
             "--force-tty",
-            # remove '--no-log' while diagnosing fork failures, then re-add if you prefer
-            f"--session={jtrsession}"
+            "--no-log",
+            f"--session={jtrsession}",
         ]
         if int(johnFork) > 1:
-            cmd.append(f"--fork:{johnFork}")
-        if stackedRule:
-            cmd.append(stackedRule)
+            parts.append(f"--fork:{johnFork}")
+        if crule is not None and stackedRule:
+            parts.insert(6, stackedRule.strip())  # place near --rules
 
-        print("\r\nRunning:\r\n" + " ".join(cmd) + "\r\n")
+        cmd_str = " ".join(parts)
+
+        print("\nRunning:\n" + cmd_str + "\n")
+
+        # Let john inherit the terminal so hotkeys (e.g., 's') work.
         try:
-            rc = _run_john_with_retry(cmd, env)
-            if rc != 0:
-                print(f"[!] John exited with code {rc}. Check ~/.john/john.log for details.")
+            ret = subprocess.call(cmd_str, shell=True)
         except KeyboardInterrupt:
-            print("\r\nInterrupted John run by user (KeyboardInterrupt).")
-        except Exception as e:
-            print(f"[!] Error running John: {e}")
+            print("\n[!] Aborted current john run by user.")
+            continue
 
     isRunning = False
+    # Post-run: if john cracked more, optionally rebuild master if -s was set
+    if rebuildAfterCrack:
+        print("\n[i] Rebuilding master list because -s was set...")
+        _run_potpy_build()
 
-def displayConfig():
-    print("Session Name: " + jtrsession)
-    print("Min-Length: " + minlength)
-    print("Max-Length: " + maxlength + "\r\n")
 
-def main(build_first: bool, rebuild_on_crack: bool):
-    displayConfig()
+def createRuleList(isChained, isWordlists, wordlist, john_bin: str):
+    """Prompt user to select rules; supports indices or names; always shows what’s loaded."""
+    print("\nDiscovering rule sections...")
+    readConf(john_bin)
 
-    # If requested, build master FIRST
-    if build_first:
-        ok = updateShell()
-        if not ok:
-            print("[!] Master build reported an error. Continuing to cracking anyway...")
+    if not ruleList:
+        print("[!] No rules discovered. Check john config/paths / binary.")
+        sys.exit(1)
 
-    # Snapshot pots BEFORE cracking
-    watch = _pot_watch_list() if rebuild_on_crack else []
-    before = _snapshot(watch) if watch else {}
-
-    setJohnFork()
-    verifyPaths()
-    createRuleList()
-
-    # After cracking, if any potfile changed, rebuild master again
-    if rebuild_on_crack and watch:
-        after = _snapshot(watch)
-        dirty = _changed(before, after)
-        if dirty:
-            print("\n[+] Detected updated potfiles during cracking:")
-            for p in dirty:
-                print("    -", p)
-            print("[+] Rebuilding master wordlist to include newly cracked credentials...")
-            updateShell()
-        else:
-            print("\n[+] No potfile changes detected; skipping post-crack rebuild.")
-
-def verifyPaths():
-    global wordlistDir
-    if (isWordlists):
-        wordlistDir = wordlist.replace("*","")
-        if (os.path.exists(wordlistDir) == False):
-            print("The wordlist directory could not be found:" + wordlistDir + "\r\nExiting")
-            exit()
+    print("\nEnter rules by index (e.g., 0,1,5) or by name (e.g., best64,d3ad0ne).")
+    print("Use * to run all (minus some extra-heavy sets).")
+    if isChained:
+        prompt = ("Enter the numbers/names separated by commas. "
+                  "The FIRST becomes --rules, the rest become --rules-stack: ")
     else:
-        if (os.path.exists(wordlist) == False):
-            print("The wordlist could not be found:" + wordlist + "\r\nExiting")
-            exit()
+        prompt = "Enter the number(s)/name(s) of the rule(s) to run: "
 
-    # For hashes: allow patterns/dirs; only hard-fail if it's a literal missing path
-    if (os.path.exists(hashFile.replace("*","")) == False) and (not any(ch in hashFile for ch in ["*", "?", "["])) and (not os.path.isdir(hashFile)):
-        print("Hash file(s) could not be found:" + hashFile + "\r\nExiting")
-        exit()
+    # keep prompting until we get at least one valid selection
+    while True:
+        if not sys.stdin.isatty():
+            default_rule = ruleList[0]
+            print(f"[i] Non-interactive; defaulting to rule: {default_rule}")
+            crackpwds(default_rule, wordlist, None, john_bin)
+            return
+
+        val = input(f"\n{prompt}").strip()
+        # Skip a few notorious mega-sets when '*' is used (avoid huge load times)
+        extrarules = ["o3", "i3"]  # you can expand if desired
+
+        selected: List[str] = []
+
+        if val == "*":
+            selected = [r for r in ruleList if r not in extrarules]
+        else:
+            tokens = [x.strip() for x in val.split(",") if x.strip()]
+            for t in tokens:
+                if t.isnumeric():
+                    idx = int(t)
+                    if 0 <= idx < len(ruleList):
+                        selected.append(ruleList[idx])
+                    else:
+                        print(f"[!] Index out of range: {idx} (0..{len(ruleList)-1})")
+                else:
+                    if t in ruleList:
+                        selected.append(t)
+                    else:
+                        # case-insensitive exact match
+                        matches = [r for r in ruleList if r.lower() == t.lower()]
+                        if matches:
+                            selected.extend(matches)
+                        else:
+                            print(f"[!] No such rule name: {t}")
+
+        # dedupe, preserve order
+        seen = set()
+        selected = [r for r in selected if not (r in seen or seen.add(r))]
+
+        if not selected:
+            print("[!] No valid rules selected. Please try again.")
+            continue
+
+        if isChained:
+            crule = selected[0]
+            stacked = ",".join(selected[1:]) if len(selected) > 1 else ""
+            print(f"\nUsing --rules:{crule}" + (f" and --rules-stack:{stacked}" if stacked else ""))
+            crackpwds(stacked, wordlist, crule, john_bin)
+        else:
+            for rname in selected:
+                print(f"\nUsing --rules:{rname}")
+                crackpwds(rname, wordlist, None, john_bin)
+        return
+
 
 def handler(signal_received, frame):
-    """Ctrl-C: skip/abort current run if running, else exit."""
     try:
-        if (isRunning):
-            print("\r\n\r\nAborting current john wordlist/rule\r\nIf another wordlist is available, cracking will continue.\r\n")
+        if isRunning:
+            print("\n\nAborting current john wordlist/rule\n"
+                  "If another wordlist is available, cracking will continue.\n")
         else:
-            exit(0)
-    except:
-        exit(0)
+            sys.exit(0)
+    except Exception:
+        sys.exit(0)
 
-if __name__ == '__main__':
-    signal.signal(signal.SIGINT, handler)
 
+# ------------------ Main ------------------
+def main():
+    # ASCII header
     print("___________________________________________________________")
     print("       _ __             __         __               ")
     print("      (_) /______      / /_  ___  / /___  ___  _____")
@@ -518,81 +384,102 @@ if __name__ == '__main__':
     print("    / / /_/ /  /_____/ / / /  __/ / /_/ /  __/ /    ")
     print(r" __/ /\__/_/        /_/ /_/\___/_/ .___/\___/_/     ")
     print("/___/                           /_/                 ")
-    print("\r\njtr-helper 1.35")
-    print("Ensure Configurations are set for jtr-helper.py")
-    print("    set values for: johnConf, johnLocalConf, jtrLocation\r\n")
-    print("                 __             ")
-    print("    ____  ____  / /_____  __  __")
-    print(r"   / __ \/ __ \/ __/ __ \/ / / /")
-    print("  / /_/ / /_/ / /_/ /_/ / /_/ / ")
-    print(r" / .___/\____/\__/ .___/\__, /  ")
-    print("/_/             /_/    /____/   ")
-    print("\r\npotpy (parallel+cache) integration + potfile-change rebuild")
-    print("___________________________________________________________\n\n")
+    print("\njtr-helper\n")
+    print("Ensure Configurations are set:")
+    print("  johnConf, johnLocalConf, jtrLocation")
+    print("  potpy_script, final_master\n")
+    print("___________________________________________________________\n")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-b", "--build", help="build the master wordlist first and exit", action='store_const', const=True)
-    parser.add_argument("-s", "--script", help="build the master wordlist first, then run cracking", action='store_const', const=True)
-
-    parser.add_argument("-f", "--format", help="specify the jtr hash format")
+    parser.add_argument("-b", "--build", help="only build the master wordlist and exit",
+                        action='store_const', const=True)
+    parser.add_argument("-f", "--format", dest="format", help="specify the jtr hash format (comma-separated OK)")
     parser.add_argument("-w", "--wordlist", help="specify the file with wordlist")
-    parser.add_argument("-r", "--recursive", help="used with wordlists if a directory is defined: -w /wordlistDIR/*", action='store_const', const=True)
-    parser.add_argument("-hash", "--hashes", help="specify the file with hashes")
+    parser.add_argument("-r", "--recursive",
+                        help="used with wordlists if a directory is defined: -w /wordlistDIR/*",
+                        action='store_const', const=True)
+    parser.add_argument("-hash", "--hashes", help="specify the file with hashes (globs like hashes/* allowed)")
     parser.add_argument("-min", "--minlength", help="specify the min-length")
     parser.add_argument("-max", "--maxlength", help="specify the max-length")
     parser.add_argument("-session", "--session", help="specify the session")
-    parser.add_argument("--no-post-rebuild", action="store_true", help="do not rebuild after cracking even if potfiles changed")
+    parser.add_argument("-s", "--script",
+                        help="also (re)build master wordlist before and after cracking",
+                        action='store_const', const=True)
+    parser.add_argument("-c", "--chained",
+                        help="chain rules: first selection is --rules; remaining are --rules-stack",
+                        action='store_const', const=True)
+    parser.add_argument("--john-bin", help="Path to john binary (overrides jtrLocation)")
 
     args = parser.parse_args()
 
-    # Build-only: build first then exit
+    # Build only?
     if args.build:
-        ok = updateShell()
-        sys.exit(0 if ok else 1)
+        updateShell(True)
+        sys.exit(0)
 
-    # Validate cracking args for normal/script mode
-    if args.format and args.wordlist and args.hashes:
-        hashFormats = args.format
-        wordlist = args.wordlist
-        hashFile = args.hashes
-        isChained = False  # chained mode omitted here; can be re-enabled if needed
-        if (args.recursive is None and "/*" in args.wordlist):
-            print("You must specify a wordlist file. \r\n* can not be used without the -r option for wordlist.\r\nPlease correct: " + args.wordlist)
-            exit()
-        elif (args.recursive and "/*" in args.wordlist):
-            isWordlists = True
-        else:
-            isWordlists = False
-        ruleList = []
-    else:
+    if not (args.format and args.wordlist and args.hashes):
         parser.print_help()
-        exit()
+        sys.exit(1)
 
-    if (args.minlength is None):
-        minlength='8'
+    # Globals set here
+    global hashFormats, wordlist, hashFile, isWordlists, isChained
+    global minlength, maxlength, jtrsession, rebuildAfterCrack
+
+    hashFormats = args.format
+    wordlist = args.wordlist
+    hashFile = args.hashes
+
+    isChained = True if args.chained is not None else False
+    rebuildAfterCrack = True if args.script is not None else False
+
+    # Wordlist directory recursion
+    if args.recursive and "/*" in args.wordlist:
+        isWordlists = True
     else:
-        minlength=args.minlength
+        isWordlists = False
+        if args.recursive and "/*" not in args.wordlist:
+            print("[!] -r ignored because -w does not end with /*")
 
-    if (args.maxlength is None):
-        maxlength='24'
-    else:
-        maxlength=args.maxlength
-
-    if (minlength.isnumeric() == False):
+    # Lengths
+    minlength = args.minlength if args.minlength else '8'
+    maxlength = args.maxlength if args.maxlength else '24'
+    if not minlength.isnumeric():
         print("Please enter a number for minlength")
-        exit()
-    if (maxlength.isnumeric() == False):
+        sys.exit(1)
+    if not maxlength.isnumeric():
         print("Please enter a number for maxlength")
-        exit()
+        sys.exit(1)
 
-    if (args.session is None):
-        jtrsession = setSessionIfNull()
+    # Session
+    if args.session:
+        jtrsession = args.session
     else:
-        jtrsession=args.session
+        jtrsession = setSessionIfNull()
 
-    # If -s/--script is present: build first, then run cracking.
-    # Also rebuild at the end if potfiles changed, unless --no-post-rebuild is set.
-    build_first = True if args.script else False
-    rebuild_on_crack = False if args.no_post_rebuild else True
+    # Resolve john bin
+    john_bin = _resolve_john_binary(args.john_bin or "")
 
-    main(build_first, rebuild_on_crack)
+    # Show basic config
+    displayConfig()
+
+    # Pre-build if -s
+    if rebuildAfterCrack:
+        updateShell(True)
+
+    # Verify paths (and allow hash globs)
+    verifyPaths(wordlist, hashFile, isWordlists)
+
+    # Get a fork value (interactive if TTY)
+    setJohnFork()
+
+    # PROMPT FOR RULES
+    if isWordlists:
+        root = wordlist.replace("*", "")
+        createRuleList(isChained, isWordlists=True,  wordlist=root,     john_bin=john_bin)
+    else:
+        createRuleList(isChained, isWordlists=False, wordlist=wordlist, john_bin=john_bin)
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handler)
+    main()
