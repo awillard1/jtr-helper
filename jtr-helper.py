@@ -28,19 +28,21 @@ import sys
 import shutil
 import tempfile
 import glob
+from pathlib import Path
+HOME = Path.home()
 
 ######## BEGIN CONFIGURATION ########
-johnConf = "/home/willard/src/john/run/john.conf"
-johnLocalConf = "/home/willard/src/john/run/john-local.conf"
-jtrLocation = "/home/willard/src/john/run/john"
+johnConf      = str((HOME / "src" / "john" / "run" / "john.conf").expanduser())
+johnLocalConf = str((HOME / "src" / "john" / "run" / "john-local.conf").expanduser())
+jtrLocation   = str((HOME / "src" / "john" / "run" / "john").expanduser())
 ######## END CONFIGURATION   ########
 
 # ---- potpy parallel-merge config ----
-potpy_script   = "/home/willard/scripts/potpy.py"        # path to potpy.py (fast merge CLI)
+potpy_script   = str((HOME / "scripts" / "potpy.py").expanduser())       # path to potpy.py (fast merge CLI)
 fast_tmpdir    = "/tmp/potpy"                            # set to disk-backed path if /tmp is tmpfs (e.g., /mnt/nvme/potpy_tmp)
 fast_mem       = "25%"                                   # GNU sort memory (-S)
 fast_parallel  = max(1, (os.cpu_count() or 1) // 2)      # --parallel for sort
-final_master   = "/home/willard/wordlists/master.lst"    # final master path
+final_master   = str((HOME / "wordlists" / "master.lst").expanduser())   # final master path
 cache_dir      = os.path.expanduser("~/.cache/potpy/decoded")
 gc_cache_days  = 30                                      # days to keep decoded cache; 0 disables GC
 
