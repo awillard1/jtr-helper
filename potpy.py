@@ -29,9 +29,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable, List, Optional
 import hashlib
 import time
+from pathlib import Path
+
+HOME = Path.home()
 
 # -------- CONFIGURATION (edit as needed) --------
-directory = "/mnt/c/PenTesting/data/potfiles/"
+directory = "/mnt/c/PenTesting/data/potfiles/"  # keep as-is, or change to HOME / "potfiles" if preferred
 potfiles: List[str] = []
 
 # Collect files in directory
@@ -41,15 +44,23 @@ if os.path.isdir(directory):
         if os.path.isfile(full_path):
             potfiles.append(full_path)
 
-# Additional known potfiles (edit for your environment)
+# discover user-based john pot as a fallback candidate
+user_john_pot = str((HOME / "src" / "john" / "run" / "john.pot").expanduser())
+# also prefer ~/.john/john.pot if present
+user_john_dotpot = str((HOME / ".john" / "john.pot").expanduser())
+
+# existing list (keep Windows/mnt paths) but use home-aware john pot
+# -------- CONFIGURE (add and remove potfiles - these are from the machine it was developed on - Windows with WSL - kali) --------
 potfiles.extend([
     "/mnt/c/PenTesting/data/hashcat-6.2.6/master.txt",
     "/mnt/c/PenTesting/hashcat.potfile",
     "/mnt/c/PenTesting/data/hashcat-6.2.6/hashcat.potfile",
-    "/home/willard/src/john/run/john.pot",
+    user_john_pot,
+    user_john_dotpot,
 ])
 
-wordlist_dir = "/home/willard/wordlists/"
+# Wordlist dir in the current user's home
+wordlist_dir = str((HOME / "wordlists").expanduser()) + os.sep
 finalFileName = "master.lst"
 # ------------------------------------------------
 
