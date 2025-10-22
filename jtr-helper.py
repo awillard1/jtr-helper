@@ -198,33 +198,68 @@ def verifyPaths(wordlist, hashFile, isWordlists):
             sys.exit(1)
 
 
+import os, sys, time, shlex, subprocess
+
 def _run_potpy_build():
     """Run potpy to (re)build master list; prints start/end and elapsed."""
     if not os.path.isfile(potpy_script):
         print(f"[!] potpy.py not found: {potpy_script}")
         return False
 
+    # Tunables (env overrides allowed)
+    tmpdir   = os.environ.get("POTPY_TMPDIR", "/tmp/potpy")
+    threads  = int(os.environ.get("POTPY_THREADS", max(1, min((os.cpu_count() or 1), 16))))
+    mem      = os.environ.get("POTPY_MEM", "50%")  # external sort/join memory (e.g., 50% or 8G)
+
+    # Ensure tmpdir exists
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except Exception as e:
+        print(f"[!] Could not create tmpdir '{tmpdir}': {e}")
+        return False
+
+    # Build candidate commands (best → fallback)
+    candidates = [
+        # Fast, parallel external sort path
+        [sys.executable, potpy_script, "--merge-parallel",
+         "--final", final_master, "--tmpdir", tmpdir, "--mem", str(mem), "--parallel", str(threads)],
+        # External sort path without Python multiprocessing (still quite fast)
+        [sys.executable, potpy_script, "--merge-fast",
+         "--final", final_master, "--tmpdir", tmpdir, "--mem", str(mem), "--parallel", str(threads)],
+        # Pure-Python path (slowest, but most compatible)
+        [sys.executable, potpy_script, "--merge",
+         "--final", final_master],
+    ]
+
     start = time.time()
     print("\nUpdating Master Wordlist")
     print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(start))}")
 
-    cmd = [sys.executable, potpy_script, "build", "--final", final_master]
-    print("[i] Running:", " ".join(shlex.quote(x) for x in cmd))
-    try:
-        ret = subprocess.call(cmd)
-    except KeyboardInterrupt:
-        print("\n[!] Update aborted by user.")
-        return False
+    ret = 1
+    last_cmd = None
+    for cmd in candidates:
+        last_cmd = cmd
+        print("[i] Running:", " ".join(shlex.quote(x) for x in cmd))
+        try:
+            ret = subprocess.call(cmd)
+        except KeyboardInterrupt:
+            print("\n[!] Update aborted by user.")
+            return False
+        if ret == 0:
+            break
+        else:
+            print(f"[!] Mode failed (exit {ret}), trying next…")
 
     end = time.time()
     if ret == 0:
-        print(f"[+] Update Completed")
+        print("[+] Update Completed")
     else:
         print(f"[!] Update failed (exit code {ret})")
 
     print(f"End time:   {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(end))}")
     print(f"Elapsed:    {end - start:.1f}s\n")
     return ret == 0
+
 
 
 def updateShell(isUpdateMaster):
